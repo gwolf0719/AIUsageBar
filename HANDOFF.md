@@ -4,6 +4,8 @@
 
 **狀態**：v1.0.0。多帳號（存副本、查其他帳號用量、切換、移除）、品牌圖示、通用版打包已完成，公開 repo 為 gwolf0719/AIUsageBar。
 
+**未發布**：main 上已有 Gemini 週額度（RetrieveUserQuotaSummary）與儀表板改版，公開 release 仍是 v1.0.0。使用者 2026-11-16 說先不發 v1.0.1；要發時用 `./release.sh 1.0.1`，README 截圖換成新的 `-states.png`。
+
 **未驗證**
 - 點狀態列彈出儀表板、⋯ 選單、「切換」按鈕：只有離屏截圖，實際點擊待使用者確認（AppleScript 點不到 macOS 26 狀態列）。
 - 真實帳號切換：目前每家只有一個帳號，只用 `--accounts-test` 演練過（暫存檔＋測試鑰匙圈項目）。第一次真的切 Claude 時確認 `claude` 顯示的帳號正確。
