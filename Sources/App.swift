@@ -223,6 +223,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         guard let button = item.button else { return }
         model.now = Date()
+        // 卡片區最多到螢幕可用高度扣掉標題、底列與彈出框邊距，超過就捲動。
+        if let screen = button.window?.screen ?? NSScreen.main {
+            model.maxCardsHeight = max(300, screen.visibleFrame.height - 150)
+        }
         model.launchAtLogin = SMAppService.mainApp.status == .enabled
         if Date().timeIntervalSince(lastRefresh) > 60 { refresh() }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)

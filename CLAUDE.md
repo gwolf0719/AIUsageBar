@@ -22,7 +22,7 @@ macOS 狀態列工具，顯示 ChatGPT / Claude / Gemini 訂閱額度。說明�
 
 - 改解析器：在 `Sources/SelfTest.swift` 補案例，`./build.sh` 會擋。
 - 改帳號存取／切換：`--accounts-test`（暫存檔＋測試用鑰匙圈項目，不碰真正的登入）。
-- 改抓取：`--dump` 實跑。改狀態列外觀：`--snapshot x.png` 看圖。改儀表板：`--render-dashboard x` 看淺色／深色／異常狀態三張圖。改位置相關：`--where`。改登入流程：`--terminal-test <檔案>`（不會真的觸發登入）。
+- 改抓取：`--dump` 實跑。改狀態列外觀：`--snapshot x.png` 看圖。改儀表板：`--render-dashboard x` 看淺色／深色／異常狀態／螢幕太矮（應出現捲動）四張圖。改位置相關：`--where`。改登入流程：`--terminal-test <檔案>`（不會真的觸發登入）。
 - 這台沒有螢幕錄製權限，`screencapture` 拍不到選單列內容，不要拿它當驗證。
 
 ## 地雷

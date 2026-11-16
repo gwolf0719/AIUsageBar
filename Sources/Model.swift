@@ -7,8 +7,12 @@ struct UsageWindow: Codable, Equatable {
     var resetsAt: Date?
     /// 是否參與狀態列上的「最緊的那一格」計算。
     var headline: Bool = true
+    /// 同一家底下的模型群組（例如 Antigravity 的「Gemini」「Claude / GPT」）；nil 表示只有一組。
+    var group: String? = nil
 
     var remaining: Double { max(0, min(100, 100 - usedPercent)) }
+    /// 含群組的完整名稱，例如「Gemini 每週」。
+    var title: String { group.map { "\($0) \(name)" } ?? name }
 }
 
 struct Snapshot: Codable, Equatable {
@@ -79,6 +83,34 @@ func countdown(_ date: Date?, now: Date = Date()) -> String {
     if m >= 1440 { return "\(m / 1440)d\(m % 1440 / 60)h" }
     if m >= 60 { return "\(m / 60)h\(m % 60)m" }
     return "\(max(1, m))m"
+}
+
+/// 儀表板用的完整寫法：「4 天 13 小時」「4 小時 56 分」「58 分鐘」。
+func countdownLong(_ date: Date, now: Date = Date()) -> String {
+    let seconds = Int(date.timeIntervalSince(now))
+    if seconds <= 0 { return "已重置" }
+    let m = max(1, seconds / 60)
+    if m >= 1440 { return m % 1440 / 60 == 0 ? "\(m / 1440) 天" : "\(m / 1440) 天 \(m % 1440 / 60) 小時" }
+    if m >= 60 { return m % 60 == 0 ? "\(m / 60) 小時" : "\(m / 60) 小時 \(m % 60) 分" }
+    return "\(m) 分鐘"
+}
+
+/// 重置的時刻：「今天 21:03」「明天 01:01」「週六 09:04」，一週以上（或同一個星期幾）加日期「11/23 週一 20:01」。
+func resetMoment(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
+    let f = DateFormatter()
+    f.calendar = calendar
+    f.timeZone = calendar.timeZone
+    f.locale = Locale(identifier: "zh_TW")
+    f.dateFormat = "HH:mm"
+    let clock = f.string(from: date)
+    let days = calendar.dateComponents([.day], from: calendar.startOfDay(for: now), to: calendar.startOfDay(for: date)).day ?? 0
+    if days == 0 { return "今天 \(clock)" }
+    if days == 1 { return "明天 \(clock)" }
+    f.dateFormat = "EEE"
+    let weekday = f.string(from: date).replacingOccurrences(of: "週", with: "")
+    if days > 1 && days < 7 { return "週\(weekday) \(clock)" }
+    f.dateFormat = "M/d"
+    return "\(f.string(from: date)) 週\(weekday) \(clock)"
 }
 
 func percentText(_ value: Double) -> String { "\(Int(value.rounded()))%" }

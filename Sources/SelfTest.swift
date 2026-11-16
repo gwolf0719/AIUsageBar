@@ -17,6 +17,20 @@ func runSelfTest() -> Bool {
     check("倒數：不足一分鐘顯示 1m", countdown(now.addingTimeInterval(20), now: now) == "1m")
     check("倒數：已過", countdown(now.addingTimeInterval(-5), now: now) == "已重置")
     check("倒數：未知", countdown(nil, now: now) == "--")
+    check("完整倒數：天＋小時", countdownLong(now.addingTimeInterval(4 * 86400 + 13 * 3600 + 30), now: now) == "4 天 13 小時")
+    check("完整倒數：整天", countdownLong(now.addingTimeInterval(2 * 86400 + 59), now: now) == "2 天")
+    check("完整倒數：小時＋分", countdownLong(now.addingTimeInterval(4 * 3600 + 56 * 60), now: now) == "4 小時 56 分")
+    check("完整倒數：分鐘、已過", countdownLong(now.addingTimeInterval(20), now: now) == "1 分鐘"
+          && countdownLong(now.addingTimeInterval(-1), now: now) == "已重置")
+    do {
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone(identifier: "Asia/Taipei")!
+        let mon = cal.date(from: DateComponents(year: 2026, month: 11, day: 16, hour: 20, minute: 0))!  // 週一
+        func at(_ d: Int, _ h: Int, _ m: Int) -> Date { cal.date(from: DateComponents(year: 2026, month: 11, day: d, hour: h, minute: m))! }
+        check("重置時刻：今天／明天", resetMoment(at(16, 21, 3), now: mon, calendar: cal) == "今天 21:03"
+              && resetMoment(at(17, 1, 1), now: mon, calendar: cal) == "明天 01:01")
+        check("重置時刻：一週內寫星期幾", resetMoment(at(21, 9, 4), now: mon, calendar: cal) == "週六 09:04")
+        check("重置時刻：下週同一天加日期", resetMoment(at(23, 20, 1), now: mon, calendar: cal) == "11/23 週一 20:01")
+    }
     check("ISO 含小數秒", parseISO("2026-11-16T08:03:10.123456+00:00") != nil)
     check("ISO 不含小數秒", parseISO("2026-11-22T14:15:38Z") != nil)
 
@@ -72,11 +86,11 @@ func runSelfTest() -> Bool {
      {"displayName":"Gemini 4 Argon","buckets":[
       {"bucketId":"gemini-argon-wtu-weekly","window":"weekly","remainingFraction":0.97,"resetTime":"2026-11-22T14:15:38Z"}]}]}}
     """))
-    check("Gemini 摘要：每個群組的 5 小時與每週都有", summary?.map(\.name)
-          == ["Gemini 每週", "Gemini 5 小時", "Gemini 4 Argon 每週", "Claude / GPT 每週", "Claude / GPT 5 小時"])
-    check("Gemini 摘要：每週有下次重置時間", summary?.first { $0.name == "Gemini 每週" }?.resetsAt == parseISO("2026-11-21T01:04:55Z"))
+    check("Gemini 摘要：每個群組的 5 小時與每週都有、5 小時在前", summary?.map(\.title)
+          == ["Gemini 5 小時", "Gemini 每週", "Gemini 4 Argon 每週", "Claude / GPT 5 小時", "Claude / GPT 每週"])
+    check("Gemini 摘要：每週有下次重置時間", summary?.first { $0.title == "Gemini 每週" }?.resetsAt == parseISO("2026-11-21T01:04:55Z"))
     check("Gemini 摘要：缺 remainingFraction 視為用完、只有 Gemini 影響狀態列",
-          summary.map { Snapshot(windows: $0, fetchedAt: Date()) }?.headline?.name == "Gemini 5 小時"
+          summary.map { Snapshot(windows: $0, fetchedAt: Date()) }?.headline?.title == "Gemini 5 小時"
           && summary?.filter(\.headline).count == 3)
     check("Gemini 摘要：格式不符回傳 nil", GeminiProvider.parseSummary(json(#"{"response":{}}"#)) == nil
           && GeminiProvider.parseSummary(json(#"{"response":{"groups":[]}}"#)) == nil)

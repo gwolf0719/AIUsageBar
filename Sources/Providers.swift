@@ -292,14 +292,17 @@ struct GeminiProvider: Provider {
                 case let other?: span = other
                 case nil: span = bucket["displayName"] as? String ?? "?"
                 }
-                windows.append(UsageWindow(name: "\(name) \(span)", usedPercent: (1 - fraction) * 100, resetsAt: reset,
-                                           headline: display.hasPrefix("Gemini")))
+                windows.append(UsageWindow(name: span, usedPercent: (1 - fraction) * 100, resetsAt: reset,
+                                           headline: display.hasPrefix("Gemini"), group: name))
             }
         }
         guard !windows.isEmpty else { return nil }
-        // 穩定排序：Gemini 系列（影響狀態列）排前面，其餘維持原順序。
+        // 穩定排序：Gemini 系列（影響狀態列）排前面；同一群組內 5 小時在前、每週在後，跟其他家一致。
+        func rank(_ w: UsageWindow) -> Int { w.name == "5 小時" ? 0 : w.name == "每週" ? 1 : 2 }
         return windows.enumerated().sorted { a, b in
-            a.element.headline != b.element.headline ? a.element.headline : a.offset < b.offset
+            if a.element.headline != b.element.headline { return a.element.headline }
+            if a.element.group == b.element.group && rank(a.element) != rank(b.element) { return rank(a.element) < rank(b.element) }
+            return a.offset < b.offset
         }.map(\.element)
     }
 }

@@ -19,7 +19,7 @@ func describe(_ results: [String: Result<Snapshot, UsageError>]) {
         case .success(let s):
             print("\(p.title)  方案：\(s.plan ?? "?")")
             for w in s.windows {
-                print("  \(w.headline ? "*" : " ") \(w.name)：剩 \(percentText(w.remaining))，\(countdown(w.resetsAt)) 後重置")
+                print("  \(w.headline ? "*" : " ") \(w.title)：剩 \(percentText(w.remaining))，\(countdown(w.resetsAt)) 後重置")
             }
         case .failure(let e): print("\(p.title)  ⚠︎ \(e.message)")
         case nil: print("\(p.title)  （無結果）")
@@ -69,8 +69,11 @@ if args.contains("--selftest") {
         // 這張全部是假資料（不含真實帳號），README 的截圖用它。
         model.states["claude"] = ProviderState(error: "未登入", needsLogin: true)
         model.states["gemini"] = ProviderState(snapshot: Snapshot(plan: "Google AI Pro", windows: [
-            UsageWindow(name: "Gemini 3 Pro / Gemini 3 Flash", usedPercent: 8, resetsAt: Date().addingTimeInterval(4 * 3600)),
-            UsageWindow(name: "Claude Sonnet / GPT-OSS", usedPercent: 0, resetsAt: Date().addingTimeInterval(5 * 3600), headline: false)],
+            UsageWindow(name: "5 小時", usedPercent: 8, resetsAt: Date().addingTimeInterval(4 * 3600), group: "Gemini"),
+            UsageWindow(name: "每週", usedPercent: 42, resetsAt: Date().addingTimeInterval(4 * 86400 + 5 * 3600), group: "Gemini"),
+            UsageWindow(name: "每週", usedPercent: 12, resetsAt: Date().addingTimeInterval(6 * 86400), group: "Gemini 4 Argon"),
+            UsageWindow(name: "5 小時", usedPercent: 0, resetsAt: Date().addingTimeInterval(5 * 3600), headline: false, group: "Claude / GPT"),
+            UsageWindow(name: "每週", usedPercent: 0, resetsAt: Date().addingTimeInterval(7 * 86400), headline: false, group: "Claude / GPT")],
             fetchedAt: Date(), account: "me@gmail.com", accountKey: "me@gmail.com"))
         model.states["codex"] = ProviderState(
             snapshot: Snapshot(plan: "plus", windows: [
@@ -94,6 +97,9 @@ if args.contains("--selftest") {
         ]
         model.book = demo
         renderDashboardPNG(model, dark: false, to: args[i + 1] + "-states.png")
+        // 第四張：螢幕高度不夠時，卡片區應改成捲動，標題與底列仍在。
+        model.maxCardsHeight = 420
+        renderDashboardPNG(model, dark: true, to: args[i + 1] + "-short.png")
         exit(0)
     }
     RunLoop.main.run()

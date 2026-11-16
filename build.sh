@@ -49,6 +49,7 @@ if [ "${1:-}" = "install" ]; then
   mkdir -p "$HOME/Applications"
   rm -rf "$HOME/Applications/AIUsageBar.app"
   cp -R "$APP" "$HOME/Applications/"
-  open "$HOME/Applications/AIUsageBar.app"
+  # 剛複製完 LaunchServices 偶爾還沒認得新 app，也會回 -600：重試幾次。
+  for i in 1 2 3 4 5; do open "$HOME/Applications/AIUsageBar.app" 2>/dev/null && break; [ "$i" = 5 ] && exit 1; sleep 1; done
   echo "已安裝並啟動：~/Applications/AIUsageBar.app"
 fi

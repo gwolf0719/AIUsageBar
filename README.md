@@ -71,7 +71,7 @@ xattr -dr com.apple.quarantine /Applications/AIUsageBar.app
 build/AIUsageBar.app/Contents/MacOS/AIUsageBar --selftest          # 解析器自我測試（build.sh 每次都跑）
 build/AIUsageBar.app/Contents/MacOS/AIUsageBar --dump              # 實際抓一次並印出
 build/AIUsageBar.app/Contents/MacOS/AIUsageBar --snapshot out.png  # 輸出狀態列圖像
-build/AIUsageBar.app/Contents/MacOS/AIUsageBar --render-dashboard out  # 儀表板截圖：out-light/-dark/-states.png
+build/AIUsageBar.app/Contents/MacOS/AIUsageBar --render-dashboard out  # 儀表板截圖：out-light/-dark/-states/-short.png
 build/AIUsageBar.app/Contents/MacOS/AIUsageBar --where             # 印出狀態列項目的螢幕位置
 build/AIUsageBar.app/Contents/MacOS/AIUsageBar --terminal-test /tmp/x  # 用登入同一條路徑開終端機，只建立標記檔
 build/AIUsageBar.app/Contents/MacOS/AIUsageBar --accounts-test     # 用暫存檔＋測試鑰匙圈項目演練切換帳號
