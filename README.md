@@ -24,7 +24,7 @@ A macOS menu bar app showing remaining quota and reset times for ChatGPT (Codex 
 |---|---|---|
 | GPT | `~/.codex/auth.json`（Codex CLI） | `chatgpt.com/backend-api/wham/usage` |
 | CL | 鑰匙圈 `Claude Code-credentials`，其次 `~/.claude/.credentials.json`（Claude Code CLI） | `api.anthropic.com/api/oauth/usage` |
-| GM | 執行中的 Antigravity（`language_server` 的啟動參數與本機連接埠） | 本機 `GetUserStatus`，不經外網 |
+| GM | 執行中的 Antigravity（`language_server` 的啟動參數與本機連接埠） | 本機 `RetrieveUserQuotaSummary`（各模型群組的 5 小時與每週額度）＋ `GetUserStatus`（方案、帳號），不經外網 |
 
 平常只讀不寫，也從不自行換發 token（Claude / Codex 的 refresh token 會輪替，自行換發會把 CLI 登出）；
 token 過期時開一次對應的 CLI 就會自動更新。唯一會寫入 CLI 登入位置的是你按下「切換」的時候：

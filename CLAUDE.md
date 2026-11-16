@@ -30,4 +30,5 @@ macOS 狀態列工具，顯示 ChatGPT / Claude / Gemini 訂閱額度。說明�
 - macOS 26 的狀態列項目由控制中心代管，`occlusionState` 一律回報不可見，不能用來判斷有沒有顯示；System Events 也抓不到 `menu bar 2`，無法用 AppleScript 模擬點擊。
 - SwiftUI 不用 `@Observable`／`#Preview` 這類巨集，用 `ObservableObject`，避免依賴 Xcode 才有的巨集外掛。
 - 儀表板截圖用離屏 `NSHostingView` + `cacheDisplay`，不要用 `ImageRenderer`（AppKit 底層的按鈕、勾選框畫不出來）。
+- Antigravity 的 `GetUserStatus` 每個模型只給「目前卡住的那一格」（大多是 5 小時），看不到週額度；週額度要用 `RetrieveUserQuotaSummary`（群組 → buckets，`window` 為 `5h`／`weekly`）。舊版沒有這個介面時才退回逐模型的數字。
 - Antigravity 回應是 protobuf 轉 JSON：`remainingFraction` 為 0 時欄位會消失，有 `resetTime` 沒有比例要當成用完。

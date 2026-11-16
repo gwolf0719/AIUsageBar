@@ -60,6 +60,26 @@ func runSelfTest() -> Bool {
     check("Gemini：Gemini 系列排前面", gemini?.windows.map(\.headline) == [true, true, false])
     check("Gemini：缺 remainingFraction 視為用完", gemini?.headline?.name == "Gemini 3.8 Flash" && gemini?.headline?.remaining == 0)
     check("Gemini：非 Gemini 模型不影響狀態列", gemini?.headline?.name != "Claude Opus 5.5")
+    // RetrieveUserQuotaSummary（形狀取自 2026-11-16 本機實測回應）
+    let summary = GeminiProvider.parseSummary(json("""
+    {"response":{"groups":[
+     {"displayName":"Gemini Models","buckets":[
+      {"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.83,"resetTime":"2026-11-21T01:04:55Z"},
+      {"bucketId":"gemini-5h","window":"5h","resetTime":"2026-11-16T13:03:10Z"}]},
+     {"displayName":"Claude and GPT models","buckets":[
+      {"bucketId":"3p-weekly","window":"weekly","remainingFraction":1,"resetTime":"2026-11-23T12:01:12Z"},
+      {"bucketId":"3p-5h","window":"5h","remainingFraction":1,"resetTime":"2026-11-16T17:01:12Z"}]},
+     {"displayName":"Gemini 4 Argon","buckets":[
+      {"bucketId":"gemini-argon-wtu-weekly","window":"weekly","remainingFraction":0.97,"resetTime":"2026-11-22T14:15:38Z"}]}]}}
+    """))
+    check("Gemini 摘要：每個群組的 5 小時與每週都有", summary?.map(\.name)
+          == ["Gemini 每週", "Gemini 5 小時", "Gemini 4 Argon 每週", "Claude / GPT 每週", "Claude / GPT 5 小時"])
+    check("Gemini 摘要：每週有下次重置時間", summary?.first { $0.name == "Gemini 每週" }?.resetsAt == parseISO("2026-11-21T01:04:55Z"))
+    check("Gemini 摘要：缺 remainingFraction 視為用完、只有 Gemini 影響狀態列",
+          summary.map { Snapshot(windows: $0, fetchedAt: Date()) }?.headline?.name == "Gemini 5 小時"
+          && summary?.filter(\.headline).count == 3)
+    check("Gemini 摘要：格式不符回傳 nil", GeminiProvider.parseSummary(json(#"{"response":{}}"#)) == nil
+          && GeminiProvider.parseSummary(json(#"{"response":{"groups":[]}}"#)) == nil)
     check("Gemini：解析啟動參數", GeminiProvider.argument("--csrf_token", in: "/x/language_server --a 1 --csrf_token abc-123 --b") == "abc-123"
           && GeminiProvider.argument("--csrf_token", in: "ls --csrf_token=zzz") == "zzz"
           && GeminiProvider.argument("--csrf_token", in: "ls --other") == nil)

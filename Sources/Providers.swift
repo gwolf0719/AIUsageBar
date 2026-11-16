@@ -213,13 +213,23 @@ struct GeminiProvider: Provider {
             let listening = shell("/usr/sbin/lsof", ["-nP", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN", "-Fn"]) ?? ""
             let ports = Set(listening.split(separator: "\n").compactMap { $0.split(separator: ":").last.flatMap { Int($0) } })
             for port in ports.sorted() {
-                let result = try? await http(
-                    "https://127.0.0.1:\(port)/exa.language_server_pb.LanguageServerService/GetUserStatus",
-                    method: "POST",
-                    headers: ["Connect-Protocol-Version": "1", "X-Codeium-Csrf-Token": csrf],
-                    json: ["metadata": ["ideName": "antigravity", "extensionName": "antigravity", "locale": "en"]],
-                    session: Self.local, timeout: 4)
-                if let (status, body) = result, status == 200, let body { return try Self.parse(body) }
+                func call(_ method: String) async -> Any? {
+                    let result = try? await http(
+                        "https://127.0.0.1:\(port)/exa.language_server_pb.LanguageServerService/\(method)",
+                        method: "POST",
+                        headers: ["Connect-Protocol-Version": "1", "X-Codeium-Csrf-Token": csrf],
+                        json: ["metadata": ["ideName": "antigravity", "extensionName": "antigravity", "locale": "en"]],
+                        session: Self.local, timeout: 4)
+                    guard let (status, body) = result, status == 200 else { return nil }
+                    return body
+                }
+                guard let body = await call("GetUserStatus") else { continue }
+                var snapshot = try Self.parse(body)
+                // 額度摘要才有「5 小時」與「每週」分開的視窗；舊版 Antigravity 沒有這個介面就沿用逐模型的數字。
+                if let summary = await call("RetrieveUserQuotaSummary"), let windows = Self.parseSummary(summary) {
+                    snapshot.windows = windows
+                }
+                return snapshot
             }
         }
         if pids.isEmpty { throw UsageError("Antigravity 未執行", needsLogin: true) }
@@ -261,6 +271,36 @@ struct GeminiProvider: Provider {
         let plan = (status["userTier"] as? [String: Any])?["name"] as? String
         let email = status["email"] as? String
         return Snapshot(plan: plan, windows: windows, fetchedAt: now, account: email, accountKey: email)
+    }
+
+    /// RetrieveUserQuotaSummary：每個模型群組各有 5 小時與每週額度。沒有可用的視窗就回傳 nil。
+    static func parseSummary(_ body: Any) -> [UsageWindow]? {
+        guard let groups = ((body as? [String: Any])?["response"] as? [String: Any])?["groups"] as? [[String: Any]] else { return nil }
+        var windows: [UsageWindow] = []
+        for group in groups {
+            let display = group["displayName"] as? String ?? "?"
+            let name = display == "Gemini Models" ? "Gemini"
+                : display == "Claude and GPT models" ? "Claude / GPT" : display
+            for bucket in group["buckets"] as? [[String: Any]] ?? [] {
+                let reset = (bucket["resetTime"] as? String).flatMap(parseISO)
+                // protobuf 會省略 0：有重置時間但沒有 remainingFraction 代表已用完。
+                guard let fraction = double(bucket["remainingFraction"]) ?? (reset != nil ? 0 : nil) else { continue }
+                let span: String
+                switch bucket["window"] as? String {
+                case "5h": span = "5 小時"
+                case "weekly": span = "每週"
+                case let other?: span = other
+                case nil: span = bucket["displayName"] as? String ?? "?"
+                }
+                windows.append(UsageWindow(name: "\(name) \(span)", usedPercent: (1 - fraction) * 100, resetsAt: reset,
+                                           headline: display.hasPrefix("Gemini")))
+            }
+        }
+        guard !windows.isEmpty else { return nil }
+        // 穩定排序：Gemini 系列（影響狀態列）排前面，其餘維持原順序。
+        return windows.enumerated().sorted { a, b in
+            a.element.headline != b.element.headline ? a.element.headline : a.offset < b.offset
+        }.map(\.element)
     }
 }
 
