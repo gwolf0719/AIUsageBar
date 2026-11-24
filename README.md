@@ -5,7 +5,7 @@ macOS 狀態列小工具：同時顯示 ChatGPT、Claude、Gemini 訂閱的**剩
 
 A macOS menu bar app showing remaining quota and reset times for ChatGPT (Codex CLI), Claude (Claude Code) and Gemini (Antigravity), with multi-account switching. No dependencies, no telemetry.
 
-![儀表板（示範資料）](https://github.com/gwolf0719/AIUsageBar/releases/download/v1.0.0/screenshot.png)
+![儀表板（示範資料）](https://github.com/gwolf0719/AIUsageBar/releases/download/v1.0.1/screenshot.png)
 
 狀態列每家一欄：上排是品牌圖示＋最緊那個額度的剩餘百分比，下排是多久後重置。
 
