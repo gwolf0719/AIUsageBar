@@ -4,12 +4,16 @@
 
 **狀態**：v1.0.0。多帳號（存副本、查其他帳號用量、切換、移除）、品牌圖示、通用版打包已完成，公開 repo 為 gwolf0719/AIUsageBar。
 
-**未發布**：main 上已有 Gemini 週額度（RetrieveUserQuotaSummary）與儀表板改版，公開 release 仍是 v1.0.0。使用者 2026-11-16 說先不發 v1.0.1；要發時用 `./release.sh 1.0.1`，README 截圖換成新的 `-states.png`。
+**未發布**：main 上已有 Gemini 週額度（RetrieveUserQuotaSummary）、儀表板改版、Antigravity 2.34 的 CSRF 權杖修正、Claude 使用中帳號過期自動換發（2026-11-24），公開 release 仍是 v1.0.0。使用者 2026-11-16 說先不發 v1.0.1；要發時用 `./release.sh 1.0.1`，README 截圖換成新的 `-states.png`。
 
 **未驗證**
 - 點狀態列彈出儀表板、⋯ 選單、「切換」按鈕：只有離屏截圖，實際點擊待使用者確認（AppleScript 點不到 macOS 26 狀態列）。
 - 真實帳號切換：目前每家只有一個帳號，只用 `--accounts-test` 演練過（暫存檔＋測試鑰匙圈項目）。第一次真的切 Claude 時確認 `claude` 顯示的帳號正確。
 - Intel 版：只確認 `lipo` 有 x86_64，沒在 Intel 機器上跑過。
+
+**未驗證**（換發）
+- 換發不會延長 refresh token 期限（換發前後都是 2026-12-21 到期）；到期那天預期要 `claude auth login`，屆時確認提示正確。
+- 桌面版或 CLI 開著閒置時被本工具換掉 token，之後它們能否自己接上新的：未實測。
 
 **待決（產品取捨，問使用者）**
 - Claude 不在使用中的帳號 token 約 8 小時就過期，之後只剩最後紀錄＋重置推估。要不要讓本工具替「不在使用中」的帳號換發 token（只有本工具持有那份，不會影響 CLI）。

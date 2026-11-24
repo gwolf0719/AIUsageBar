@@ -9,8 +9,8 @@ macOS 狀態列工具，顯示 ChatGPT / Claude / Gemini 訂閱額度。說明�
 
 ## 硬規則
 
-- **永遠不換發 refresh token。** Claude / Codex 的 refresh token 會輪替，換發會把使用者的 CLI 登出。
-- **只有使用者按「切換」才寫入 CLI 登入位置**（`switchAccount`）：寫之前一定先把目前登入存進 vault 並備份設定檔。其他路徑一律只讀。
+- **只有一種情況換發 refresh token：使用中的 Claude 帳號已過期**（`ClaudeProvider.renew`，2026-11-24 使用者定案）。refresh token 會輪替，換發後舊的就失效，所以這條路的三道保護不可拿掉：換發前先試寫登入位置、新憑證先落地到 `claude-pending.json` 再寫回、同時間只跑一個並重讀。Codex、不在使用中的帳號副本一律不換發。
+- **寫入 CLI 登入位置只有兩條路**：使用者按「切換」（`switchAccount`，寫之前先把目前登入存進 vault 並備份設定檔），以及上面那條換發後寫回。其他路徑一律只讀。
 - 帳號副本只放 `~/Library/Application Support/AIUsageBar/accounts/`、權限 0600；`security -i` 一行約 4KB 上限，寫鑰匙圈前檢查長度並讀回比對。
 - 公開 repo：截圖只能用 `--render-dashboard` 的 `-states.png`（全部假資料），不放含真實帳號的圖；截圖放 release 附件，不進 git。
 - **不印出、不記錄任何 token**（`--dump`、紀錄檔、錯誤訊息都一樣）。
@@ -21,7 +21,7 @@ macOS 狀態列工具，顯示 ChatGPT / Claude / Gemini 訂閱額度。說明�
 ## 驗證
 
 - 改解析器：在 `Sources/SelfTest.swift` 補案例，`./build.sh` 會擋。
-- 改帳號存取／切換：`--accounts-test`（暫存檔＋測試用鑰匙圈項目，不碰真正的登入）。
+- 改帳號存取／切換／換發：`--accounts-test`（暫存檔＋測試用鑰匙圈項目，不碰真正的登入）。
 - 改抓取：`--dump` 實跑。改狀態列外觀：`--snapshot x.png` 看圖。改儀表板：`--render-dashboard x` 看淺色／深色／異常狀態／螢幕太矮（應出現捲動）四張圖。改位置相關：`--where`。改登入流程：`--terminal-test <檔案>`（不會真的觸發登入）。
 - 這台沒有螢幕錄製權限，`screencapture` 拍不到選單列內容，不要拿它當驗證。
 

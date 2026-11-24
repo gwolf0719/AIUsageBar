@@ -97,6 +97,26 @@ func runSelfTest() -> Bool {
     check("Gemini：解析啟動參數", GeminiProvider.argument("--csrf_token", in: "/x/language_server --a 1 --csrf_token abc-123 --b") == "abc-123"
           && GeminiProvider.argument("--csrf_token", in: "ls --csrf_token=zzz") == "zzz"
           && GeminiProvider.argument("--csrf_token", in: "ls --other") == nil)
+    let oldSecret = #"{"claudeAiOauth":{"accessToken":"a1","expiresAt":1000,"rateLimitTier":"default_claude_max_5x","refreshToken":"r1","scopes":["user:inference"]},"other":{"keep":1}}"#
+    let t0 = Date(timeIntervalSince1970: 2_000_000)
+    let merged = ClaudeProvider.renewed(oldSecret, with: ["access_token": "a2", "refresh_token": "r2", "expires_in": 3600], now: t0)
+    let mergedRoot = merged.flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) } as? [String: Any]
+    let mergedOAuth = mergedRoot?["claudeAiOauth"] as? [String: Any] ?? [:]
+    check("Claude：換發回應併入憑證", mergedOAuth["accessToken"] as? String == "a2" && mergedOAuth["refreshToken"] as? String == "r2"
+          && double(mergedOAuth["expiresAt"]) == 2_003_600_000 && mergedOAuth["rateLimitTier"] as? String == "default_claude_max_5x"
+          && mergedOAuth["scopes"] as? [String] == ["user:inference"] && (mergedRoot?["other"] as? [String: Any])?["keep"] as? Int == 1)
+    check("Claude：回應沒有新 refresh token 就沿用舊的",
+          ((ClaudeProvider.renewed(oldSecret, with: ["access_token": "a2", "expires_in": 60], now: t0).flatMap(ClaudeProvider.oauth))?["refreshToken"] as? String) == "r1")
+    check("Claude：換發回應不完整就不採用", ClaudeProvider.renewed(oldSecret, with: ["refresh_token": "r2", "expires_in": 60]) == nil
+          && ClaudeProvider.renewed(oldSecret, with: ["access_token": "a2"]) == nil && ClaudeProvider.renewed(oldSecret, with: nil) == nil)
+    check("Claude：到期判斷", ClaudeProvider.expired(oldSecret, now: t0) && !ClaudeProvider.expired(merged ?? "", now: t0)
+          && !ClaudeProvider.expired(#"{"claudeAiOauth":{"accessToken":"a"}}"#))
+    // 2.34 起命令列沒有 --csrf_token，權杖在 `ps eww` 尾端的環境變數裡。
+    check("Gemini：CSRF 權杖（參數或環境變數）",
+          GeminiProvider.csrfToken(in: "/x/language_server --standalone --https_server_port 0 HOME=/Users/me ANTIGRAVITY_SERVER_CSRF_TOKEN=aa-11 LANG=zh_TW.UTF-8") == "aa-11"
+          && GeminiProvider.csrfToken(in: "ls --csrf_token old ANTIGRAVITY_SERVER_CSRF_TOKEN=new") == "old"
+          && GeminiProvider.csrfToken(in: "ls --standalone ANTIGRAVITY_SERVER_CSRF_TOKEN=") == nil
+          && GeminiProvider.csrfToken(in: "ls --standalone HOME=/x") == nil)
 
     // 狀態列欄位
     let columns = StatusRenderer.columns([CodexProvider(), ClaudeProvider()],
@@ -161,7 +181,25 @@ func fakeCodexAuth(email: String, account: String, exp: Date) -> String {
     return String(data: try! JSONSerialization.data(withJSONObject: auth, options: [.sortedKeys]), encoding: .utf8)!
 }
 
-/// 演練切換：全部用暫存資料夾與測試專用的鑰匙圈項目，不碰真正的 CLI 登入。
+/// 記錄假的換發介面被呼叫了幾次、收到哪些 refresh token。
+actor CallLog {
+    private(set) var seen: [String] = []
+    var count: Int { seen.count }
+    func add(_ token: String) -> Int { seen.append(token); return seen.count }
+}
+
+/// 測試用：在同步的測試流程裡等一段 async 工作做完。
+final class ResultBox<T>: @unchecked Sendable { var value: T? }
+
+func blocking<T>(_ work: @escaping () async -> T) -> T {
+    let box = ResultBox<T>()
+    let done = DispatchSemaphore(value: 0)
+    Task.detached { box.value = await work(); done.signal() }
+    done.wait()
+    return box.value!
+}
+
+/// 演練切換與換發：全部用暫存資料夾與測試專用的鑰匙圈項目，不碰真正的 CLI 登入。
 func runAccountsTest() -> Bool {
     var failures = 0
     func check(_ name: String, _ ok: Bool) { print(ok ? "✓" : "✗", name); if !ok { failures += 1 } }
@@ -219,6 +257,76 @@ func runAccountsTest() -> Bool {
         check("Claude：B 已存起來可切回", vault.load("claude", "u-B|o")?.secret == claudeSecret("B"))
         check("Claude：切換前有備份設定檔", FileManager.default.fileExists(atPath: vault.dir.appendingPathComponent("backup-claude.json").path))
     } catch { check("Claude 切換：\(error.localizedDescription)", false) }
+
+    // Claude 換發：假的換發回應＋測試鑰匙圈項目。
+    let renewing: ClaudeProvider = {
+        var c = claude; c.pendingPath = tmp.appendingPathComponent("vault/claude-pending.json").path; return c
+    }()
+    let calls = CallLog()
+    @Sendable func exchange(status: Int = 200) -> ClaudeProvider.TokenExchange {
+        { refresh, _ in
+            let n = await calls.add(refresh)
+            try? await Task.sleep(nanoseconds: 200_000_000)   // 拉長一點，讓同時進來的第二個請求撞上
+            return (status, ["access_token": "at-new\(n)", "refresh_token": "rt-new\(n)", "expires_in": 28800,
+                             "refresh_token_expires_in": 2_592_000, "scope": "user:inference user:profile"])
+        }
+    }
+    func stale(_ n: String) -> String { claudeSecret(n).replacingOccurrences(of: "9999999999999", with: "1000") }
+    func oauth(_ secret: String?) -> [String: Any] { secret.flatMap(ClaudeProvider.oauth) ?? [:] }
+    let pendingExists = { FileManager.default.fileExists(atPath: renewing.pendingPath) }
+    do {
+        try keychainWrite(service: service, account: NSUserName(), secret: claudeSecret("A"))
+        _ = blocking { try? await renewing.activeCredential(exchange: exchange()) }
+        check("換發：沒過期不換", blocking { await calls.count } == 0)
+
+        try keychainWrite(service: service, account: NSUserName(), secret: stale("A"))
+        let pair = blocking { () -> [String?] in
+            async let x = try? renewing.activeCredential(exchange: exchange())
+            async let y = try? renewing.activeCredential(exchange: exchange())
+            return [await x?.secret, await y?.secret]
+        }
+        let stored = oauth(renewing.readActive()?.secret)
+        check("換發：同時兩個請求只換一次", blocking { await calls.seen } == ["rt-A"] && pair[0] != nil && pair[0] == pair[1])
+        check("換發：新憑證寫回鑰匙圈", stored["accessToken"] as? String == "at-new1" && stored["refreshToken"] as? String == "rt-new1"
+              && pair[0] == renewing.readActive()?.secret)
+        check("換發：到期時間更新、其他欄位保留", !ClaudeProvider.expired(renewing.readActive()!.secret)
+              && (double(stored["refreshTokenExpiresAt"]) ?? 0) > Date().timeIntervalSince1970 * 1000
+              && stored["subscriptionType"] as? String == "max" && (stored["scopes"] as? [String])?.count == 2)
+        check("換發：成功後不留暫存", !pendingExists())
+
+        try keychainWrite(service: service, account: NSUserName(), secret: stale("B"))
+        let denied = blocking { () -> UsageError? in
+            do { _ = try await renewing.activeCredential(exchange: exchange(status: 400)); return nil } catch { return error as? UsageError }
+        }
+        check("換發：被拒絕就要求重新登入，鑰匙圈不動", denied?.needsLogin == true && renewing.readActive()?.secret == stale("B") && !pendingExists())
+
+        // 上次換到新憑證但沒寫成功：下次補寫，不再換一次。
+        let before = blocking { await calls.count }
+        let left = ClaudeProvider.PendingRenewal(replaces: ClaudeProvider.digest(stale("B")), secret: claudeSecret("B2"))
+        try writePrivateFile(try JSONEncoder().encode(left), to: renewing.pendingPath)
+        let recovered = blocking { try? await renewing.activeCredential(exchange: exchange()) }
+        check("換發：補寫上次沒寫成功的新憑證", recovered?.secret == claudeSecret("B2") && renewing.readActive()?.secret == claudeSecret("B2")
+              && !pendingExists() && blocking { await calls.count } == before)
+
+        // CLI 已自行更新（登入位置不是被換掉的那份）：暫存作廢。
+        try writePrivateFile(try JSONEncoder().encode(left), to: renewing.pendingPath)
+        _ = blocking { try? await renewing.activeCredential(exchange: exchange()) }
+        check("換發：登入位置已被 CLI 更新就丟掉暫存", renewing.readActive()?.secret == claudeSecret("B2") && !pendingExists())
+
+        // 登入位置寫不進去（唯讀資料夾裡的憑證檔）：不可以把 refresh token 用掉。
+        _ = shell("/usr/bin/security", ["delete-generic-password", "-s", service])
+        let locked = tmp.appendingPathComponent("locked")
+        var filed = renewing
+        filed.credentialsFile = locked.appendingPathComponent("credentials.json").path
+        try writePrivateFile(Data(stale("C").utf8), to: filed.credentialsFile)
+        try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: locked.path)
+        let count = blocking { await calls.count }
+        let blocked = blocking { () -> UsageError? in
+            do { _ = try await filed.activeCredential(exchange: exchange()); return nil } catch { return error as? UsageError }
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: locked.path)
+        check("換發：寫不進登入位置就不換", blocked?.needsLogin == true && blocking { await calls.count } == count && read(filed.credentialsFile) == stale("C"))
+    } catch { check("Claude 換發：\(error.localizedDescription)", false) }
 
     print(failures == 0 ? "全部通過" : "\(failures) 項失敗")
     return failures == 0

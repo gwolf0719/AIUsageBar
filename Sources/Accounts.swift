@@ -3,7 +3,7 @@ import Foundation
 
 // 多帳號：每次更新時把 CLI 目前登入的那一份憑證複製一份到本機（權限 0600，跟 CLI 自己的 auth.json 同等級），
 // 不在使用中的帳號就用存下來的 access token 唯讀查詢用量；token 過期就顯示最後一次的數字。
-// 永遠不換發 token。只有使用者按「切換」時，才把選定帳號的憑證寫回 CLI 的登入位置。
+// 這些副本永遠不換發 token。只有使用者按「切換」時，才把選定帳號的憑證寫回 CLI 的登入位置。
 
 /// 一份帳號憑證副本。secret：Codex 是 auth.json 全文、Claude 是鑰匙圈裡的 JSON。
 struct SavedCredential: Codable, Equatable {
@@ -196,6 +196,19 @@ func switchAccount(_ source: CredentialSource, provider: String, to key: String,
 }
 
 // MARK: - 小工具
+
+/// 同一時間只跑一份工作；進行中再有人要求就等同一份結果。
+actor SingleFlight {
+    private var inFlight: Task<String, Error>?
+
+    func run(_ work: @escaping @Sendable () async throws -> String) async throws -> String {
+        if let inFlight { return try await inFlight.value }
+        let task = Task { try await work() }
+        inFlight = task
+        defer { inFlight = nil }
+        return try await task.value
+    }
+}
 
 /// 解 JWT 的 payload（不驗簽，只用來讀 email 與到期時間）。
 func jwtClaims(_ token: String) -> [String: Any]? {

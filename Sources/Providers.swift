@@ -1,8 +1,9 @@
 import AppKit
+import CryptoKit
 
-// 平常只「讀」本機 CLI 的登入狀態，絕不自行換發 refresh token
-// （Claude / Codex 的 refresh token 會輪替，自行換發會把 CLI 的登入弄壞）。
-// 唯一會寫入 CLI 登入位置的時機：使用者在儀表板按「切換」帳號（見 Accounts.swift）。
+// 平常只「讀」本機 CLI 的登入狀態。會寫入 CLI 登入位置的只有兩個時機：
+// 使用者在儀表板按「切換」帳號（見 Accounts.swift），以及使用中的 Claude 帳號過期時換發（見 ClaudeProvider.renew）。
+// Codex 與不在使用中的帳號副本不換發（refresh token 會輪替，換發會把 CLI 的登入弄壞）。
 
 // MARK: - ChatGPT（Codex CLI：~/.codex/auth.json）
 
@@ -102,9 +103,110 @@ struct ClaudeProvider: Provider, CredentialSource {
     /// Claude Code 把「目前登入的是誰」（email、組織）放在這裡，跟鑰匙圈裡的 token 是一組。
     var configPath = ("~/.claude.json" as NSString).expandingTildeInPath
 
+    /// 換發途中的新憑證先放這裡，寫回登入位置成功才刪（見 renew）。
+    var pendingPath = AccountVault().dir.appendingPathComponent("claude-pending.json").path
+
     func fetch() async throws -> Snapshot {
-        guard let active = readActive() else { throw UsageError("未登入", needsLogin: true) }
-        return try await fetch(active)
+        try await fetch(try await activeCredential())
+    }
+
+    // MARK: 使用中帳號過期時換發
+    //
+    // 鑰匙圈裡的 access token 約 8 小時到期，只有 claude CLI 發請求時才會換新；使用者不跑 CLI 就會一直顯示過期。
+    // 所以「使用中的帳號已過期」時由本工具換發並寫回 CLI 的登入位置（2026-11-24 使用者定案）。
+    // refresh token 會輪替，換發後舊的就失效，因此：
+    //   1. 換發前先把原內容寫回一次，確認登入位置寫得進去，寫不進去就不換；
+    //   2. 換到的新憑證先落地到 pendingPath 再寫登入位置，中途失敗下次會補寫；
+    //   3. 同一時間只跑一個換發，進去後重讀一次（CLI 可能剛好自己換過）。
+    // 不在使用中的帳號副本、Codex 一律不換發。
+
+    typealias TokenExchange = @Sendable (_ refreshToken: String, _ scopes: [String]) async throws -> (Int, Any?)
+    static let tokenURL = "https://platform.claude.com/v1/oauth/token"
+    static let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"   // Claude Code 的公開 OAuth client id
+    private static let gate = SingleFlight()
+
+    struct PendingRenewal: Codable {
+        /// 被換掉的那份憑證的雜湊：登入位置還是它，才把新憑證補寫進去。
+        var replaces: String
+        var secret: String
+    }
+
+    static func exchange(refreshToken: String, scopes: [String]) async throws -> (Int, Any?) {
+        var body = ["grant_type": "refresh_token", "refresh_token": refreshToken, "client_id": clientID]
+        if !scopes.isEmpty { body["scope"] = scopes.joined(separator: " ") }
+        return try await http(tokenURL, method: "POST", json: body, timeout: 30)
+    }
+
+    /// 目前登入的憑證；已過期就換發。
+    func activeCredential(exchange: @escaping TokenExchange = { try await ClaudeProvider.exchange(refreshToken: $0, scopes: $1) }) async throws -> SavedCredential {
+        guard var active = readActive() else { throw UsageError("未登入", needsLogin: true) }
+        guard Self.expired(active.secret) || FileManager.default.fileExists(atPath: pendingPath) else { return active }
+        active.secret = try await Self.gate.run { try await self.renew(exchange) }
+        return active
+    }
+
+    private func renew(_ exchange: TokenExchange) async throws -> String {
+        guard var secret = readActive()?.secret else { throw UsageError("未登入", needsLogin: true) }
+        // 上次換發後沒寫成功的新憑證：登入位置還是舊的那份才補寫，否則代表 CLI 已自行更新，丟掉。
+        if let data = FileManager.default.contents(atPath: pendingPath),
+           let pending = try? JSONDecoder().decode(PendingRenewal.self, from: data) {
+            if pending.replaces == Self.digest(secret) {
+                if (try? store(pending.secret)) != nil { try? FileManager.default.removeItem(atPath: pendingPath) }
+                secret = pending.secret
+            } else {
+                try? FileManager.default.removeItem(atPath: pendingPath)
+            }
+        }
+        guard Self.expired(secret) else { return secret }
+        guard let oauth = Self.oauth(secret), let refresh = oauth["refreshToken"] as? String, !refresh.isEmpty else {
+            throw UsageError("登入已過期", needsLogin: true)
+        }
+        do { try store(secret) } catch { throw UsageError("登入已過期（登入位置無法寫入，未自動換新）", needsLogin: true) }
+        let (status, body) = try await exchange(refresh, oauth["scopes"] as? [String] ?? [])
+        if status == 400 || status == 401 || status == 403 { throw UsageError("登入已過期", needsLogin: true) }
+        guard status == 200 else { throw UsageError("Claude 換新登入失敗 HTTP \(status)") }
+        guard let fresh = Self.renewed(secret, with: body) else { throw UsageError("Claude 換新登入的回應格式不符") }
+        let pending = PendingRenewal(replaces: Self.digest(secret), secret: fresh)
+        try? writePrivateFile((try? JSONEncoder().encode(pending)) ?? Data(), to: pendingPath)
+        if (try? store(fresh)) != nil { try? FileManager.default.removeItem(atPath: pendingPath) }
+        return fresh
+    }
+
+    static func digest(_ text: String) -> String {
+        SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func expired(_ secret: String, now: Date = Date()) -> Bool {
+        guard let expires = double(oauth(secret)?["expiresAt"]), expires > 0 else { return false }
+        return expires / 1000 < now.timeIntervalSince1970
+    }
+
+    /// 把換發回應併進原本的憑證 JSON（其他欄位原樣保留）。回應不完整就回傳 nil。
+    static func renewed(_ secret: String, with response: Any?, now: Date = Date()) -> String? {
+        guard var root = (try? JSONSerialization.jsonObject(with: Data(secret.utf8))) as? [String: Any],
+              var oauth = root["claudeAiOauth"] as? [String: Any],
+              let r = response as? [String: Any],
+              let access = r["access_token"] as? String, !access.isEmpty,
+              let ttl = double(r["expires_in"]), ttl > 0 else { return nil }
+        let ms = now.timeIntervalSince1970 * 1000
+        oauth["accessToken"] = access
+        oauth["expiresAt"] = Int64(ms + ttl * 1000)
+        if let refresh = r["refresh_token"] as? String, !refresh.isEmpty { oauth["refreshToken"] = refresh }
+        if let life = double(r["refresh_token_expires_in"]), life > 0 { oauth["refreshTokenExpiresAt"] = Int64(ms + life * 1000) }
+        if let scope = r["scope"] as? String, !scope.isEmpty { oauth["scopes"] = scope.split(separator: " ").map(String.init) }
+        root["claudeAiOauth"] = oauth
+        return (try? JSONSerialization.data(withJSONObject: root, options: [.sortedKeys, .withoutEscapingSlashes]))
+            .flatMap { String(data: $0, encoding: .utf8) }
+    }
+
+    /// 寫入 CLI 的登入位置（鑰匙圈，或沒用鑰匙圈時的檔案）；鑰匙圈會讀回比對。
+    func store(_ secret: String) throws {
+        let existing = shell("/usr/bin/security", ["find-generic-password", "-s", keychainService]) ?? ""
+        if existing.isEmpty && FileManager.default.fileExists(atPath: credentialsFile) {
+            try writePrivateFile(Data(secret.utf8), to: credentialsFile)
+        } else {
+            try keychainWrite(service: keychainService, account: keychainAttribute("acct", in: existing) ?? NSUserName(), secret: secret)
+        }
     }
 
     func readActive() -> SavedCredential? {
@@ -131,9 +233,7 @@ struct ClaudeProvider: Provider, CredentialSource {
               let token = oauth["accessToken"] as? String, !token.isEmpty else {
             throw UsageError("未登入", needsLogin: true)
         }
-        if let expires = double(oauth["expiresAt"]), expires > 0, expires / 1000 < Date().timeIntervalSince1970 {
-            throw UsageError("登入已過期", needsLogin: true)
-        }
+        if Self.expired(credential.secret) { throw UsageError("登入已過期", needsLogin: true) }
         let (status, body) = try await http("https://api.anthropic.com/api/oauth/usage", headers: [
             "Authorization": "Bearer \(token)", "anthropic-beta": "oauth-2025-04-20",
         ])
@@ -149,14 +249,7 @@ struct ClaudeProvider: Provider, CredentialSource {
 
     /// 切換：把 token 寫回鑰匙圈（或檔案），並把 ~/.claude.json 的 oauthAccount 換成同一個帳號。
     func activate(_ credential: SavedCredential) throws {
-        let existing = shell("/usr/bin/security", ["find-generic-password", "-s", keychainService]) ?? ""
-        let usesFile = existing.isEmpty && FileManager.default.fileExists(atPath: credentialsFile)
-        if usesFile {
-            try writePrivateFile(Data(credential.secret.utf8), to: credentialsFile)
-        } else {
-            let acct = keychainAttribute("acct", in: existing) ?? NSUserName()
-            try keychainWrite(service: keychainService, account: acct, secret: credential.secret)
-        }
+        try store(credential.secret)
         guard let extra = credential.extra,
               let account = try? JSONSerialization.jsonObject(with: Data(extra.utf8)),
               let data = FileManager.default.contents(atPath: configPath),
@@ -208,8 +301,9 @@ struct GeminiProvider: Provider {
     func fetch() async throws -> Snapshot {
         let pids = (shell("/usr/bin/pgrep", ["-f", "language_server"]) ?? "").split(separator: "\n").map(String.init)
         for pid in pids {
-            guard let command = shell("/bin/ps", ["-o", "command=", "-p", pid]),
-                  let csrf = Self.argument("--csrf_token", in: command) else { continue }
+            // eww：連同環境變數一起列出（新版 Antigravity 把 CSRF 權杖放在環境變數）。
+            guard let command = shell("/bin/ps", ["eww", "-o", "command=", "-p", pid]),
+                  let csrf = Self.csrfToken(in: command) else { continue }
             let listening = shell("/usr/sbin/lsof", ["-nP", "-a", "-p", pid, "-iTCP", "-sTCP:LISTEN", "-Fn"]) ?? ""
             let ports = Set(listening.split(separator: "\n").compactMap { $0.split(separator: ":").last.flatMap { Int($0) } })
             for port in ports.sorted() {
@@ -234,6 +328,14 @@ struct GeminiProvider: Provider {
         }
         if pids.isEmpty { throw UsageError("Antigravity 未執行", needsLogin: true) }
         throw UsageError("Antigravity 本機服務沒有回應（可能尚未登入）", needsLogin: true)
+    }
+
+    /// 本機服務的 CSRF 權杖：舊版在命令列參數 `--csrf_token`，2.34 起改放環境變數。
+    static func csrfToken(in command: String) -> String? {
+        if let token = argument("--csrf_token", in: command) { return token }
+        let prefix = "ANTIGRAVITY_SERVER_CSRF_TOKEN="
+        let token = command.split(separator: " ").first { $0.hasPrefix(prefix) }?.dropFirst(prefix.count)
+        return token.flatMap { $0.isEmpty ? nil : String($0) }
     }
 
     static func argument(_ name: String, in command: String) -> String? {
