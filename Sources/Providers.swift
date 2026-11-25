@@ -114,16 +114,16 @@ struct ClaudeProvider: Provider, CredentialSource {
     //
     // 鑰匙圈裡的 access token 約 8 小時到期，只有 claude CLI 發請求時才會換新；使用者不跑 CLI 就會一直顯示過期。
     // 所以「使用中的帳號已過期」時由本工具換發並寫回 CLI 的登入位置（2026-11-24 使用者定案）。
-    // refresh token 會輪替，換發後舊的就失效，因此：
-    //   1. 換發前先把原內容寫回一次，確認登入位置寫得進去，寫不進去就不換；
-    //   2. 換到的新憑證先落地到 pendingPath 再寫登入位置，中途失敗下次會補寫；
-    //   3. 同一時間只跑一個換發，進去後重讀一次（CLI 可能剛好自己換過）。
+    // refresh token 會輪替：先驗證暫存目錄可寫，再向服務端換發。
+    // 換發和切換帳號互斥；寫回前重讀身分與原憑證，避免覆蓋 CLI 的外部變更。
+    // 新憑證優先保存救援副本；登入位置或備援失敗時明確處理。
     // 不在使用中的帳號副本、Codex 一律不換發。
 
     typealias TokenExchange = @Sendable (_ refreshToken: String, _ scopes: [String]) async throws -> (Int, Any?)
     static let tokenURL = "https://platform.claude.com/v1/oauth/token"
     static let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"   // Claude Code 的公開 OAuth client id
-    private static let gate = SingleFlight()
+    private static let gate = SingleFlight<SavedCredential>()
+    static let mutations = ClaudeCredentialMutations()
 
     struct PendingRenewal: Codable {
         /// 被換掉的那份憑證的雜湊：登入位置還是它，才把新憑證補寫進去。
@@ -139,37 +139,83 @@ struct ClaudeProvider: Provider, CredentialSource {
 
     /// 目前登入的憑證；已過期就換發。
     func activeCredential(exchange: @escaping TokenExchange = { try await ClaudeProvider.exchange(refreshToken: $0, scopes: $1) }) async throws -> SavedCredential {
+        try await Self.gate.run { try await self.renew(exchange) }
+    }
+
+    private func renew(_ exchange: TokenExchange) async throws -> SavedCredential {
+        guard Self.mutations.begin() else { throw UsageError("Claude 正在切換帳號，稍後會重新查詢") }
+        defer { Self.mutations.end() }
         guard var active = readActive() else { throw UsageError("未登入", needsLogin: true) }
-        guard Self.expired(active.secret) || FileManager.default.fileExists(atPath: pendingPath) else { return active }
-        active.secret = try await Self.gate.run { try await self.renew(exchange) }
+        let manager = FileManager.default
+        // 舊版救援檔仍可用，但只在原憑證仍是同一份時寫回。
+        if manager.fileExists(atPath: pendingPath) {
+            guard let data = manager.contents(atPath: pendingPath),
+                  let pending = try? JSONDecoder().decode(PendingRenewal.self, from: data) else {
+                throw UsageError("Claude 登入救援副本無法讀取，請重新登入確認")
+            }
+            if pending.replaces == Self.digest(active.secret) {
+                try verifyActive(active)
+                do { try store(pending.secret) }
+                catch { throw UsageError("Claude 新登入已備份，暫時無法寫回，稍後重試") }
+                active.secret = pending.secret
+            }
+            do { try manager.removeItem(atPath: pendingPath) }
+            catch { throw UsageError("Claude 無法清理登入救援副本") }
+        }
+        guard Self.expired(active.secret) else { return active }
+        guard let oauth = Self.oauth(active.secret), let refresh = oauth["refreshToken"] as? String, !refresh.isEmpty else {
+            throw UsageError("登入已過期", needsLogin: true)
+        }
+        let directory = URL(fileURLWithPath: pendingPath).deletingLastPathComponent()
+        let probe = directory.appendingPathComponent(".renew-probe-" + UUID().uuidString)
+        defer { if manager.fileExists(atPath: probe.path) { try? manager.removeItem(at: probe) } }
+        do {
+            if shell("/usr/bin/security", ["find-generic-password", "-s", keychainService])?.isEmpty != false,
+               manager.fileExists(atPath: credentialsFile),
+               !manager.isWritableFile(atPath: URL(fileURLWithPath: credentialsFile).deletingLastPathComponent().path) {
+                throw UsageError("登入位置無法寫入")
+            }
+            try writePrivateFile(Data(), to: probe.path)
+        } catch {
+            throw UsageError("Claude 登入位置或備援目錄無法寫入，未自動換新", needsLogin: true)
+        }
+
+        try verifyActive(active)
+        let (status, body) = try await exchange(refresh, oauth["scopes"] as? [String] ?? [])
+        try verifyActive(active)
+        if status == 400 || status == 401 || status == 403 { throw UsageError("登入已過期", needsLogin: true) }
+        guard status == 200 else { throw UsageError("Claude 換新登入失敗 HTTP \(status)") }
+        guard let fresh = Self.renewed(active.secret, with: body) else { throw UsageError("Claude 換新登入的回應格式不符") }
+        let pending = PendingRenewal(replaces: Self.digest(active.secret), secret: fresh)
+        try Self.persistRenewal(
+            journal: { try writePrivateFile(try JSONEncoder().encode(pending), to: pendingPath) },
+            write: { try verifyActive(active); try store(fresh) },
+            cleanup: { try manager.removeItem(atPath: pendingPath) }
+        )
+        active.secret = fresh
         return active
     }
 
-    private func renew(_ exchange: TokenExchange) async throws -> String {
-        guard var secret = readActive()?.secret else { throw UsageError("未登入", needsLogin: true) }
-        // 上次換發後沒寫成功的新憑證：登入位置還是舊的那份才補寫，否則代表 CLI 已自行更新，丟掉。
-        if let data = FileManager.default.contents(atPath: pendingPath),
-           let pending = try? JSONDecoder().decode(PendingRenewal.self, from: data) {
-            if pending.replaces == Self.digest(secret) {
-                if (try? store(pending.secret)) != nil { try? FileManager.default.removeItem(atPath: pendingPath) }
-                secret = pending.secret
-            } else {
-                try? FileManager.default.removeItem(atPath: pendingPath)
-            }
+    private func verifyActive(_ expected: SavedCredential) throws {
+        guard readActive() == expected else {
+            throw UsageError("Claude 登入已被其他程式更新，已略過寫回")
         }
-        guard Self.expired(secret) else { return secret }
-        guard let oauth = Self.oauth(secret), let refresh = oauth["refreshToken"] as? String, !refresh.isEmpty else {
-            throw UsageError("登入已過期", needsLogin: true)
+    }
+
+    static func persistRenewal(journal: () throws -> Void, write: () throws -> Void, cleanup: () throws -> Void) throws {
+        let saved: Bool
+        do { try journal(); saved = true } catch { saved = false }
+        do { try write() }
+        catch let error as UsageError {
+            if saved { try cleanup() }
+            throw error
+        } catch {
+            if saved { throw UsageError("Claude 新登入已備份，暫時無法寫回，稍後重試") }
+            throw UsageError("Claude 登入更新後無法儲存，請重新登入", needsLogin: true)
         }
-        do { try store(secret) } catch { throw UsageError("登入已過期（登入位置無法寫入，未自動換新）", needsLogin: true) }
-        let (status, body) = try await exchange(refresh, oauth["scopes"] as? [String] ?? [])
-        if status == 400 || status == 401 || status == 403 { throw UsageError("登入已過期", needsLogin: true) }
-        guard status == 200 else { throw UsageError("Claude 換新登入失敗 HTTP \(status)") }
-        guard let fresh = Self.renewed(secret, with: body) else { throw UsageError("Claude 換新登入的回應格式不符") }
-        let pending = PendingRenewal(replaces: Self.digest(secret), secret: fresh)
-        try? writePrivateFile((try? JSONEncoder().encode(pending)) ?? Data(), to: pendingPath)
-        if (try? store(fresh)) != nil { try? FileManager.default.removeItem(atPath: pendingPath) }
-        return fresh
+        if saved {
+            do { try cleanup() } catch { throw UsageError("Claude 已更新登入，但無法清理救援副本") }
+        }
     }
 
     static func digest(_ text: String) -> String {

@@ -128,7 +128,12 @@ func refreshEverything(_ providers: [Provider], states old: [String: ProviderSta
 
         switch results[p.id] {
         case .success(let snapshot)?:
-            states[p.id] = ProviderState(snapshot: snapshot, error: nil)
+            if source is ClaudeProvider, let snapshotKey = snapshot.accountKey, snapshotKey != current?.key {
+                states[p.id] = ProviderState(snapshot: old[p.id]?.snapshot.flatMap { $0.accountKey == current?.key ? $0 : nil },
+                                             error: "使用中的帳號已變更，稍後會重新查詢")
+            } else {
+                states[p.id] = ProviderState(snapshot: snapshot, error: nil)
+            }
         case .failure(let error)?:
             // 換了帳號（或登出）就不要沿用前一個帳號的舊數字。
             let keep = states[p.id]?.snapshot.flatMap { s in current == nil || s.accountKey == nil || s.accountKey == current?.key ? s : nil }
@@ -188,20 +193,53 @@ enum SwitchError: LocalizedError {
 
 /// 切換帳號：先把目前登入的憑證存好（之後才切得回來），備份設定檔，再寫入選定帳號。
 func switchAccount(_ source: CredentialSource, provider: String, to key: String, vault: AccountVault) throws {
-    if let current = source.readActive() { vault.save(provider, current) }
-    guard let target = vault.load(provider, key) else { throw SwitchError.missing("找不到這個帳號存下來的登入資料") }
-    if let claude = source as? ClaudeProvider { vault.backup(claude.configPath, as: "claude.json") }
-    if let codex = source as? CodexProvider { vault.backup(codex.authPath, as: "codex-auth.json") }
-    try source.activate(target)
+    func perform() throws {
+        if let current = source.readActive() { vault.save(provider, current) }
+        guard let target = vault.load(provider, key) else { throw SwitchError.missing("找不到這個帳號存下來的登入資料") }
+        if let claude = source as? ClaudeProvider { vault.backup(claude.configPath, as: "claude.json") }
+        if let codex = source as? CodexProvider { vault.backup(codex.authPath, as: "codex-auth.json") }
+        try source.activate(target)
+    }
+    if source is ClaudeProvider {
+        try ClaudeProvider.mutations.withSwitch(perform)
+    } else {
+        try perform()
+    }
 }
 
 // MARK: - 小工具
 
-/// 同一時間只跑一份工作；進行中再有人要求就等同一份結果。
-actor SingleFlight {
-    private var inFlight: Task<String, Error>?
+/// 一次換發的租約橫跨網路請求。鎖只用來變更租約，不在持鎖時 await。
+final class ClaudeCredentialMutations: @unchecked Sendable {
+    private let lock = NSLock()
+    private var busy = false
 
-    func run(_ work: @escaping @Sendable () async throws -> String) async throws -> String {
+    func begin() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !busy else { return false }
+        busy = true
+        return true
+    }
+
+    func end() {
+        lock.lock()
+        busy = false
+        lock.unlock()
+    }
+
+    func withSwitch(_ work: () throws -> Void) throws {
+        guard begin() else { throw SwitchError.missing("Claude 正在更新登入，請稍後再切換帳號") }
+        defer { end() }
+        try work()
+    }
+}
+
+/// 同一時間只跑一份工作；進行中再有人要求就等同一份結果。
+actor SingleFlight<Value: Sendable> {
+    private var inFlight: Task<Value, Error>?
+
+    func run(_ work: @escaping @Sendable () async throws -> Value) async throws -> Value {
         if let inFlight { return try await inFlight.value }
         let task = Task { try await work() }
         inFlight = task
