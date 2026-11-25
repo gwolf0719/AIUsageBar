@@ -204,7 +204,7 @@ func runAccountsTest() -> Bool {
     var failures = 0
     func check(_ name: String, _ ok: Bool) { print(ok ? "✓" : "✗", name); if !ok { failures += 1 } }
     let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("AIUsageBar-accounts-\(UUID().uuidString)")
-    let service = "AIUsageBar-accounts-test"
+    let service = "AIUsageBar-accounts-test-" + UUID().uuidString
     defer {
         try? FileManager.default.removeItem(at: tmp)
         _ = shell("/usr/bin/security", ["delete-generic-password", "-s", service])
@@ -312,6 +312,51 @@ func runAccountsTest() -> Bool {
         try writePrivateFile(try JSONEncoder().encode(left), to: renewing.pendingPath)
         _ = blocking { try? await renewing.activeCredential(exchange: exchange()) }
         check("換發：登入位置已被 CLI 更新就丟掉暫存", renewing.readActive()?.secret == claudeSecret("B2") && !pendingExists())
+
+        // 模擬換發中按下切換；租約應在讀／寫備份以前擋下切換。
+        try keychainWrite(service: service, account: NSUserName(), secret: stale("A"))
+        try writePrivateFile(config("A"), to: renewing.configPath)
+        let switchBlocked = CallLog()
+        let afterBlockedSwitch = blocking {
+            try? await renewing.activeCredential { _, _ in
+                do { try switchAccount(renewing, provider: "claude", to: "u-B|o", vault: vault) }
+                catch { _ = await switchBlocked.add("busy") }
+                return (200, ["access_token": "safe", "expires_in": 300])
+            }
+        }
+        check("換發：同時切換被拒絕，不會混用帳號",
+              blocking { await switchBlocked.count } == 1 && afterBlockedSwitch?.key == "u-A|o"
+              && oauth(renewing.readActive()?.secret)["accessToken"] as? String == "safe")
+        try switchAccount(renewing, provider: "claude", to: "u-B|o", vault: vault)
+        check("換發：完成後可正常切換", renewing.readActive()?.key == "u-B|o")
+
+        // 模擬 CLI 在網路等待期間改寫相同帳號的憑證。
+        try keychainWrite(service: service, account: NSUserName(), secret: stale("B"))
+        let externalSecret = claudeSecret("external")
+        let changed = blocking { () -> UsageError? in
+            do {
+                _ = try await renewing.activeCredential { _, _ in
+                    try keychainWrite(service: service, account: NSUserName(), secret: externalSecret)
+                    return (200, ["access_token": "do-not-store", "expires_in": 300])
+                }
+                return nil
+            } catch { return error as? UsageError }
+        }
+        check("換發：保留 CLI 外部更新", changed?.message.contains("略過寫回") == true
+              && renewing.readActive()?.secret == externalSecret && !pendingExists())
+
+        enum SyntheticFailure: Error { case write }
+        var wrote = false, removed = false
+        try ClaudeProvider.persistRenewal(journal: { throw SyntheticFailure.write }, write: { wrote = true }, cleanup: { removed = true })
+        check("換發：備援失敗，正式寫入成功仍可用", wrote && !removed)
+        var recoverable: UsageError?
+        do { try ClaudeProvider.persistRenewal(journal: {}, write: { throw SyntheticFailure.write }, cleanup: { removed = true }) }
+        catch { recoverable = error as? UsageError }
+        check("換發：正式寫入失敗保留備援並回報", recoverable?.message.contains("已備份") == true && !removed)
+        var lost: UsageError?
+        do { try ClaudeProvider.persistRenewal(journal: { throw SyntheticFailure.write }, write: { throw SyntheticFailure.write }, cleanup: {}) }
+        catch { lost = error as? UsageError }
+        check("換發：兩處都失敗會要求重新登入", lost?.needsLogin == true)
 
         // 登入位置寫不進去（唯讀資料夾裡的憑證檔）：不可以把 refresh token 用掉。
         _ = shell("/usr/bin/security", ["delete-generic-password", "-s", service])
